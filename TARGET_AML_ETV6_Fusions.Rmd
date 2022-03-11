@@ -1,0 +1,283 @@
+---
+title: "ETV6 Fusions in Pediatric AML"
+author: "Jenny Smith"
+date: "8/12/20"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME,"2020.08.12_ETV6_Fusions"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+# options(stringsAsFactors = FALSE,bitmapType = 'cairo')
+# grDevices::X11.options(type='cairo')
+```
+
+```{r message=FALSE}
+library(ggplot2)
+library(ggrepel)
+library(gridExtra)
+library(RColorBrewer)
+
+library(readr)
+library(dplyr)
+library(magrittr)
+library(tibble)
+library(tidyr)
+library(data.table)
+library(stringr)
+library(readr)
+
+
+library(tools)
+library(gtools)
+
+# library(DeGSEA)
+getwd()
+```
+
+
+#Read in the counts data
+
+```{r}
+cts <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/TARGET_AML_DSAML_MPN_NBM_Ribodepleted_dupGenesRemoved_Fractionalcounts.RDS"))
+
+dim(cts) #48230  2345 (filtered to remove all zero count rows)
+```
+
+```{r}
+cts <- as.matrix(cts[rowSums(cts)>= 10, ]) 
+
+dim(cts) #48230  2345
+```
+
+```{r}
+TPM <- readRDS(file.path(PROJHOME, "0000.00.03_ExpressionMatrices/TARGET_AML_DSAML_MPN_NBM_Ribodepleted_dupGenesRemoved_TPM.RDS"))
+
+dim(TPM) #51573  2345 (filtered to remove all zero count rows)
+```
+
+
+
+#Read in the Clinical Data
+
+```{r}
+CDEs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_7.08.20.csv"),
+                   na.strings = c("N/A","#N/A","NA","^$", "^\\.$"))
+
+CDEs <- CDEs %>% 
+  filter(!is.na(USI) | USI != "Unknown")
+
+dim(CDEs) #2396  143
+```
+
+```{r}
+manifest <- read.csv(file.path(TARGET,"SequencingDataMatrix/TARGET_AML_Ribodepleted_Master_Manifest_8.5.20.csv"), 
+                     row.names = 1)
+
+head(manifest[,1:5])
+dim(manifest) #2346   14
+```
+
+
+#Read in the fusion data 
+
+```{r eval=FALSE}
+fusions <- read.csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Intervals/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv"))
+
+dim(fusions)
+```
+
+```{r}
+curated_fusions <- read.csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Intervals/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_Cleaned_Annotated_FOI_FusionCalls_6.17.20.csv"))
+
+
+head(curated_fusions[,1:5])
+dim(curated_fusions)
+```
+
+#Check for discrepancies 
+Ideally, this will not be standard practice. Need to include the ~40 patients who were re-categorized to a different fusion in the final working CDEs.
+
+```{r}
+check <- filter(curated_fusions, !is.na(Updated_Primary.Fusion)) %>% 
+  filter(grepl("ETV6",Updated_Primary.Fusion))
+
+
+# View(check)
+dim(check) #OK none were changed to a different fusion or found to be false positive s
+```
+
+
+
+#Define Samples
+
+Jenny, can you provide me this information?
+1.  Incidence of ETV6 fusions in all patients
+2.  Incidence of ETV6 in those < 1 year
+3.  Incidence of ETV6 fusion in those <2 years
+4.  number of different ETV6 fusions (provide number for each fusion partner)
+
+```{r}
+ETV6.all <- CDEs %>% 
+  mutate(ETV6_Fusions=case_when(
+    grepl("ETV6", Primary.Fusion.CNV) | grepl("ETV6", Additional.Fusions.CNV) ~ "ETV6", 
+    grepl("No", ScreenedForFusion) ~ "Unknown",
+    TRUE ~ "OtherAML")) %>%
+  mutate_at(vars(ETV6_Fusions),
+            ~ifelse(grepl("ETV6 (deletion)",Primary.Fusion.CNV, fixed = T) | 
+                      grepl("ETV6 (deletion)",Additional.Fusions.CNV, fixed = T), "OtherAML", .)) %>%
+  mutate(Age_Under1yr=case_when(
+    Age.in.years < 1.0 ~ "Less than  1 yr",
+    grepl("Unknown",Age.Category) ~ "Unknown",
+    TRUE ~ "Greater than 1 yr")) %>%
+  mutate(Age_Under2yr=case_when(
+    Age.in.years < 2.0 ~ "Less than 2 yrs",
+    grepl("Unknown",Age.Category) ~ "Unknown",
+    TRUE ~ "Greater than 2 yrs")) %>%
+  filter(ETV6_Fusions != "Unknown")
+
+
+table(ETV6.all$ETV6_Fusions, useNA='ifany')
+table(ETV6.all$Age_Under1yr, useNA='ifany')
+table(ETV6.all$Age_Under2yr, useNA='ifany')
+```
+
+
+Three patients with ETV6 deletions: 
+	
+PAVKVT	ETV6 (deletion)
+PAWHIZ	PICALM-MLLT10	ETV6 (deletion)	
+PAXARD	KMT2A-MLLT3	ETV6 (deletion)	
+
+```{r}
+samples_Check <- ETV6.all %>%
+  select(USI,Protocol, ISCN,Primary.Fusion.CNV,Additional.Fusions.CNV,
+       ScreenedForFusion_byNGS=ScreenedForFusion,Cyto.vs..Seq,
+       ETV6_Fusions,) %>% 
+       filter(ETV6_Fusions == "ETV6") 
+
+# write.csv(samples_Check, "ETV6_Fusion_Positive_Patients.csv",row.names = FALSE)
+```
+
+```{r}
+filter(curated_fusions, grepl("PARJGD|PAUPDK", USI))
+```
+
+
+
+#Frequencies of ETV6 Fusions
+
+```{r}
+ETV6_tab1 <- ETV6.all %>% 
+  mutate(Total=n()) %>%
+  group_by(ETV6_Fusions, Total) %>% 
+  summarise(Number_of_Samples=n()) %>% 
+  ungroup() %>%
+  mutate(Percent_of_Samples=round(Number_of_Samples/Total *100, digits = 2))
+
+ETV6_tab1
+# write.csv(ETV6_tab1, "TARGET_AML_ETV6_Fusion_Overall_Frequency.csv", row.names = FALSE)
+```
+
+```{r}
+table(ETV6.all$ETV6_Fusions, ETV6.all$Age_Under1yr)
+```
+
+
+#Incidence by Age
+
+for the incidence, can you provide the flip side of the data you provided.  as in
+1.  in all patients that are <1 years of age (N=??), how many (N=??; ??%) are ETV6 fusion positive.
+2.   in all patients that are <2 years of age (N=??), how many (N=??; ??%) are ETV6 fusion positive.
+
+
+```{r}
+ETV6_1yr <- ETV6.all %>% 
+  mutate(Total=n()) %>%
+  group_by(Age_Under1yr, Total) %>%
+  mutate(Number_Per_Age_Group=n())  %>%
+  
+  
+  group_by(ETV6_Fusions,Number_Per_Age_Group, add=TRUE) %>%
+  summarise(Number_of_Samples=n()) %>%
+  ungroup() %>%
+  
+  group_by(Age_Under1yr) %>%
+  mutate(Percent_of_Samples_byAge_Group=round(Number_of_Samples/sum(Number_of_Samples) *100, digits = 2)) %>%
+  ungroup()
+
+  # group_by(ETV6_Fusions) %>%
+  # mutate(Percent_of_Samples_byETV6_Group=round(Number_of_Samples/sum(Number_of_Samples) *100, digits = 2)) %>%
+  # ungroup()
+
+ETV6_1yr
+# write.csv(ETV6_1yr, "TARGET_AML_ETV6_Fusion_Frequency_1yrOldComparison.csv")
+```
+
+```{r}
+ETV6_2yr  <- ETV6.all %>% 
+  mutate(Total=n()) %>%
+  group_by(Age_Under2yr, Total) %>%
+  mutate(Number_Per_Age_Group=n())  %>%
+  
+  
+  group_by(ETV6_Fusions,Number_Per_Age_Group, add=TRUE) %>%
+  summarise(Number_of_Samples=n()) %>%
+  ungroup() %>%
+  
+  group_by(Age_Under2yr) %>%
+  mutate(Percent_of_Samples_byAge_Group=round(Number_of_Samples/sum(Number_of_Samples) *100, digits = 2)) %>%
+  ungroup()
+
+  
+  # group_by(ETV6_Fusions) %>%
+  # mutate(Percent_of_Samples_byETV6_Group=round(Number_of_Samples/sum(Number_of_Samples) *100, digits = 2)) %>%
+  # ungroup()
+
+ETV6_2yr
+# write.csv(ETV6_2yr, "TARGET_AML_ETV6_Fusion_Frequency_2yrOld_Comparison.csv")
+```
+
+#Summarize Fusions
+
+```{r}
+ETV6_fusions_freq <- ETV6.all %>% 
+  filter(ETV6_Fusions == "ETV6") %>%
+  mutate(Fusion=case_when(
+    ! grepl("ETV6", Primary.Fusion.CNV) ~ Additional.Fusions.CNV,
+    TRUE ~ Primary.Fusion.CNV)) %>% 
+  mutate(Fusion=ifelse(grepl("NIPBL-ETV6", Fusion), "ETV6-NIPBL", Fusion)) %>%
+  select(USI,ETV6_Fusions, Fusion) %>%
+  
+  mutate(Total_ETV6_Fusions=n()) %>%
+  group_by(Fusion,Total_ETV6_Fusions) %>% 
+  summarise(Frequency=n()) %>% 
+  ungroup() %>% 
+  mutate(Percent=round(Frequency/Total_ETV6_Fusions*100, digits = 2)) %>%
+  arrange(desc(Frequency))
+
+ETV6_fusions_freq
+# View(ETV6_fusions_freq)
+
+# write.csv(ETV6_fusions_freq, "TARGET_AML_ETV6_Fusions_Frequency.csv",row.names = FALSE)
+```
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
